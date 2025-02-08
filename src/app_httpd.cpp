@@ -19,6 +19,9 @@
 #include "driver/ledc.h"
 #include "sdkconfig.h"
 #include "camera_index.h"
+#include "driver/temp_sensor.h"
+extern bool isStreaming;
+extern void showPixelColor(uint32_t c); // Function declared in main.cpp
 
 #if defined(ARDUINO_ARCH_ESP32) && defined(CONFIG_ARDUHAL_ESP_LOG)
 #include "esp32-hal-log.h"
@@ -74,7 +77,6 @@ static const char *TAG = "camera_httpd";
 
 #ifdef CONFIG_LED_ILLUMINATOR_ENABLED
 int led_duty = 0;
-bool isStreaming = false;
 #ifdef CONFIG_LED_LEDC_LOW_SPEED_MODE
 #define CONFIG_LED_LEDC_SPEED_MODE LEDC_LOW_SPEED_MODE
 #else
@@ -357,14 +359,18 @@ static esp_err_t capture_handler(httpd_req_t *req)
     int64_t fr_start = esp_timer_get_time();
 #endif
 
+    // Flash bright pink during capture (increased brightness)
+    showPixelColor(0xFF69B4);
 #ifdef CONFIG_LED_ILLUMINATOR_ENABLED
     enable_led(true);
-    vTaskDelay(150 / portTICK_PERIOD_MS); // The LED needs to be turned on ~150ms before the call to esp_camera_fb_get()
-    fb = esp_camera_fb_get();             // or it won't be visible in the frame. A better way to do this is needed.
+    vTaskDelay(300 / portTICK_PERIOD_MS); // Increased flash duration to 300ms
+    fb = esp_camera_fb_get();             
     enable_led(false);
 #else
+    vTaskDelay(300 / portTICK_PERIOD_MS); // Increased flash duration to 300ms
     fb = esp_camera_fb_get();
 #endif
+    showPixelColor(0x0); // Turn off LED after capture
 
     if (!fb)
     {
@@ -562,8 +568,13 @@ static esp_err_t stream_handler(httpd_req_t *req)
 
 #ifdef CONFIG_LED_ILLUMINATOR_ENABLED
     enable_led(true);
-    isStreaming = true;
 #endif
+    isStreaming = true;
+
+    showPixelColor(0x0000FF); // Pure blue color (0x0000FF)
+
+    static int frame_count = 0;
+    static uint64_t frame_start_time = esp_timer_get_time();
 
     while (true)
     {
@@ -751,45 +762,40 @@ static esp_err_t stream_handler(httpd_req_t *req)
         }
         if (res != ESP_OK)
         {
-            ESP_LOGE(TAG, "send frame failed failed");
+            ESP_LOGI(TAG, "Stream client disconnected"); // Changed from LOGE to LOGI since this is expected behavior
             break;
         }
-        int64_t fr_end = esp_timer_get_time();
+        
+        // Add small delay to prevent watchdog triggers
+        vTaskDelay(1);
 
-#if CONFIG_ESP_FACE_DETECT_ENABLED && ARDUHAL_LOG_LEVEL >= ARDUHAL_LOG_LEVEL_INFO
-        int64_t ready_time = (fr_ready - fr_start) / 1000;
-        int64_t face_time = (fr_face - fr_ready) / 1000;
-        int64_t recognize_time = (fr_recognize - fr_face) / 1000;
-        int64_t encode_time = (fr_encode - fr_recognize) / 1000;
-        int64_t process_time = (fr_encode - fr_start) / 1000;
-#endif
-
-        int64_t frame_time = fr_end - last_frame;
-        frame_time /= 1000;
-#if ARDUHAL_LOG_LEVEL >= ARDUHAL_LOG_LEVEL_INFO
-        uint32_t avg_frame_time = ra_filter_run(&ra_filter, frame_time);
-#endif
-        ESP_LOGI(TAG, "MJPG: %uB %ums (%.1ffps), AVG: %ums (%.1ffps)"
-#if CONFIG_ESP_FACE_DETECT_ENABLED
-                      ", %u+%u+%u+%u=%u %s%d"
-#endif
-                 ,
-                 (uint32_t)(_jpg_buf_len),
-                 (uint32_t)frame_time, 1000.0 / (uint32_t)frame_time,
-                 avg_frame_time, 1000.0 / avg_frame_time
-#if CONFIG_ESP_FACE_DETECT_ENABLED
-                 ,
-                 (uint32_t)ready_time, (uint32_t)face_time, (uint32_t)recognize_time, (uint32_t)encode_time, (uint32_t)process_time,
-                 (detected) ? "DETECTED " : "", face_id
-#endif
-        );
+        // At the end of each iteration, increment frame counter
+        frame_count++;
+        uint64_t now = esp_timer_get_time();
+        if(now - frame_start_time >= 1000000) { // every 1 second
+            int fps = frame_count;
+            frame_count = 0;
+            frame_start_time = now;
+            float temp = 0;
+            temp_sensor_read_celsius(&temp);
+            printf("Temperature: %g°C, FPS: %d\n", round(temp), fps);
+        }
     }
 
 #ifdef CONFIG_LED_ILLUMINATOR_ENABLED
-    isStreaming = false;
     enable_led(false);
 #endif
+    isStreaming = false;
 
+    showPixelColor(0x0); // Turn off LED when stream ends
+    
+    if(fb) {
+        esp_camera_fb_return(fb);
+    }
+    if(_jpg_buf) {
+        free(_jpg_buf);
+    }
+    
     return res;
 }
 

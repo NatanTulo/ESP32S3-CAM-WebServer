@@ -1,6 +1,7 @@
 #include "esp_camera.h"
 #include <Adafruit_NeoPixel.h>
 #include <WiFi.h>
+#include "driver/temp_sensor.h"
 
 #define CAMERA_MODEL_ESP32S3_EYE
 
@@ -11,6 +12,9 @@
 
 Adafruit_NeoPixel pixels(PIX_NUM, PIN_PIXS, NEO_GRB + NEO_KHZ800);
 
+extern void showPixelColor(uint32_t c); // Declaration for use in app_httpd.cpp
+extern bool isStreaming; // Add streaming flag declaration
+
 void startCameraServer();
 
 void showPixelColor(uint32_t c) {
@@ -19,25 +23,12 @@ void showPixelColor(uint32_t c) {
 }
 
 void inline startWifiConfig() {
-  delay(500);
-  WiFi.mode(WIFI_STA);
-  WiFi.begin();
-  showPixelColor(0xFF0000);
-  for (int i = 0; i < 10; i++) {
-    if (WiFi.status() == WL_CONNECTED) {
-      break;
-    }
-    delay(500);
-  }
-  if (WiFi.status() != WL_CONNECTED) {
-    WiFi.beginSmartConfig();
-    while (!WiFi.smartConfigDone()) {
-      delay(500);
-    }
-  }
-  while (!WiFi.localIP()) {
-    delay(200);
-  }
+  const char* ssid = "cam";
+  const char* password = "esp32cam"; // password must be at least 8 characters for WPA2
+  WiFi.mode(WIFI_AP);
+  WiFi.softAP(ssid, password);
+  Serial.print("Hotspot IP: ");
+  Serial.println(WiFi.softAPIP());
   showPixelColor(0x00FF00);
 }
 
@@ -88,17 +79,39 @@ void inline initCamera() {
   s->set_saturation(s, 0); // lower the saturation
 }
 
+void initTempSensor(){
+  temp_sensor_config_t temp_sensor = TSENS_CONFIG_DEFAULT();
+  temp_sensor.dac_offset = TSENS_DAC_L1;  // TSENS_DAC_L2 is default; L4(-40°C ~ 20°C), L2(-10°C ~ 80°C), L1(20°C ~ 100°C), L0(50°C ~ 125°C)
+  temp_sensor_set_config(temp_sensor);
+  temp_sensor_start();
+}
+
+unsigned long lastTempRead = 0;
+const unsigned long TEMP_READ_INTERVAL = 1000; // every 1 second
+
 void setup() {
   Serial.begin(115200);
   pixels.begin();
   pixels.setBrightness(8);
   showPixelColor(0x0);
+  initTempSensor();
   initCamera();
   startWifiConfig();
   startCameraServer();
   Serial.print("Camera Ready! Use 'http://");
-  Serial.print(WiFi.localIP());
+  Serial.print(WiFi.softAPIP());
   Serial.println("' to connect");
 }
 
-void loop() { delay(10000); }
+void loop() { 
+  unsigned long currentMillis = millis();
+  
+  if (currentMillis - lastTempRead >= TEMP_READ_INTERVAL) {
+    if (!isStreaming) { // Only when streaming is inactive
+      float temp = 0;
+      temp_sensor_read_celsius(&temp);
+      Serial.printf("Temperature: %g°C\n", round(temp));
+    }
+    lastTempRead = currentMillis;
+  }
+}
